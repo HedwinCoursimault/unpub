@@ -1,23 +1,23 @@
 import 'dart:io';
-import 'package:path/path.dart' as path;
 import 'package:args/args.dart';
-import 'package:mongo_dart/mongo_dart.dart';
+import 'package:path/path.dart' as path;
+import 'package:postgres/postgres.dart';
 import 'package:unpub/unpub.dart' as unpub;
+import 'package:unpub/src/sql_store.dart'; 
 
-main(List<String> args) async {
-  var parser = ArgParser();
-  parser.addOption('host', abbr: 'h', defaultsTo: '0.0.0.0');
-  parser.addOption('port', abbr: 'p', defaultsTo: '4000');
-  parser.addOption('database',
-      abbr: 'd', defaultsTo: 'mongodb://localhost:27017/dart_pub');
-  parser.addOption('proxy-origin', abbr: 'o', defaultsTo: '');
+Future<void> main(List<String> args) async {
+  final parser = ArgParser()
+    ..addOption('host', abbr: 'h', defaultsTo: '0.0.0.0')
+    ..addOption('port', abbr: 'p', defaultsTo: '4000')
+    ..addOption(
+      'database',
+      abbr: 'd',
+      defaultsTo: 'postgres://user:password@localhost:5432/unpub',
+      help: 'PostgreSQL URI for the metadata store',
+    )
+    ..addOption('proxy-origin', abbr: 'o', defaultsTo: '');
 
-  var results = parser.parse(args);
-
-  var host = results['host'] as String;
-  var port = int.parse(results['port'] as String);
-  var dbUri = results['database'] as String;
-  var proxy_origin = results['proxy-origin'] as String;
+  final results = parser.parse(args);
 
   if (results.rest.isNotEmpty) {
     print('Got unexpected arguments: "${results.rest.join(' ')}".\n\nUsage:\n');
@@ -25,17 +25,48 @@ main(List<String> args) async {
     exit(1);
   }
 
-  final db = Db(dbUri);
-  await db.open();
+  final host = results['host'] as String;
+  final port = int.parse(results['port'] as String);
+  final dbUri = results['database'] as String;
+  final proxyOriginRaw = results['proxy-origin'] as String;
+  final proxyOrigin =
+      proxyOriginRaw.trim().isEmpty ? null : Uri.parse(proxyOriginRaw);
 
-  var baseDir = path.absolute('unpub-packages');
+  final uri = Uri.parse(dbUri);
+  if (uri.scheme != 'postgres') {
+    stderr.writeln('Only postgres:// URI is supported for --database');
+    exit(2);
+  }
 
-  var app = unpub.App(
-    metaStore: unpub.MongoStore(db),
-    packageStore: unpub.FileStore(baseDir),
-    proxy_origin: proxy_origin.trim().isEmpty ? null : Uri.parse(proxy_origin)
+  final db = PostgreSQLConnection(
+    uri.host,
+    uri.port,
+    uri.pathSegments.first,
+    username: uri.userInfo.split(":").first,
+    password:
+        uri.userInfo.contains(":") ? uri.userInfo.split(":")[1] : null,
   );
 
-  var server = await app.serve(host, port);
-  print('Serving at http://${server.address.host}:${server.port}');
+  SqlStore store;
+
+  try {
+    await db.open();
+    store = SqlStore(db);
+    await store.initDb();
+  } catch (e) {
+    stderr.writeln('Failed to connect to PostgreSQL: $e');
+    exit(2);
+  }
+
+  final baseDir = path.absolute('unpub-packages');
+
+  final app = unpub.App(
+    metaStore: store,
+    packageStore: unpub.FileStore(baseDir),
+    proxy_origin: proxyOrigin,
+    overrideUploaderEmail: 'dev@localhost',
+  );
+
+  final server = await app.serve(host, port);
+  print('✅ Unpub PostgreSQL server ready at http://${server.address.host}:${server.port}');
 }

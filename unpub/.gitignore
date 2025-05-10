@@ -11,3 +11,8 @@ build/
 doc/api/
 unpub-packages/
 .vscode/
+
+
+# fvm
+.fvm/
+.fvmrc
