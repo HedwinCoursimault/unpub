@@ -3,4 +3,5 @@ export 'src/mongo_store.dart';
 export 'src/package_store.dart';
 export 'src/file_store.dart';
 export 'src/app.dart';
+export 'src/utils.dart';
 export 'src/models.dart';
