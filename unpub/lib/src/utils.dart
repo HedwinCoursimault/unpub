@@ -36,16 +36,10 @@ Future<void> migrateFromMongoToPostgre({
   required mongo.Db mongoConnection,
   required PostgreSQLConnection postgresConnection,
 }) async {
-  print("on entre dans la fonction");
-  print(mongoConnection.databaseName);
   final mongoPackages = mongoConnection.collection('packages');
-  print("1");
   final mongoStats = mongoConnection.collection('stats');
-  print("2");
   try {
     final packages = await mongoPackages.find().toList();
-    print("3");
-
     for (final pkg in packages) {
       final package = UnpubPackage.fromJson(pkg);
       print('Migrating ${package.name}');
