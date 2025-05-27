@@ -32,88 +32,124 @@ List<String> getPackageTags(Map<String, dynamic> pubspec) {
 }
 
 
-Future<void> migrateFromMongoToPostgre({required mongo.Db mongoConnection, required PostgreSQLConnection postgresConnection}) async{
+Future<void> migrateFromMongoToPostgre({
+  required mongo.Db mongoConnection,
+  required PostgreSQLConnection postgresConnection,
+}) async {
+  print("on entre dans la fonction");
+  print(mongoConnection.databaseName);
   final mongoPackages = mongoConnection.collection('packages');
+  print("1");
   final mongoStats = mongoConnection.collection('stats');
-  final packages = await mongoPackages.find().toList();
+  print("2");
+  try {
+    final packages = await mongoPackages.find().toList();
+    print("3");
 
-  for (final pkg in packages) {
-    final package = UnpubPackage.fromJson(pkg);
+    for (final pkg in packages) {
+      final package = UnpubPackage.fromJson(pkg);
+      print('Migrating ${package.name}');
 
-    // Insert package
-    await postgresConnection.query(
-      '''
-      INSERT INTO packages (name, private, uploaders, created_at, updated_at, download)
-      VALUES (@name, @private, @uploaders, @createdAt, @updatedAt, @download)
-      ON CONFLICT (name) DO NOTHING
-      ''',
-      substitutionValues: {
-        'name': package.name,
-        'private': package.private,
-        'uploaders': package.uploaders ?? [],
-        'createdAt': package.createdAt.toIso8601String(),
-        'updatedAt': package.updatedAt.toIso8601String(),
-        'download': package.download ?? 0,
-      },
-    );
-
-    // Get package_id
-    final result = await postgresConnection.query(
-      'SELECT id FROM packages WHERE name = @name',
-      substitutionValues: {'name': package.name},
-    );
-
-    if (result.isEmpty) {
-      print('❌ Package ID not found for ${package.name}, skipping');
-      continue;
-    }
-
-    final packageId = result.first[0] as int;
-
-    // Insert versions
-    for (final version in package.versions) {
+      // Insert package (sans uploaders)
       await postgresConnection.query(
         '''
-        INSERT INTO versions (package_name, version, pubspec, pubspec_yaml, uploader, readme, changelog, created_at)
-        VALUES (@pkgName, @version, @pubspec, @yaml, @uploader, @readme, @changelog, @createdAt)
+        INSERT INTO packages (name, private, created_at, updated_at, download)
+        VALUES (@name, @private, @createdAt, @updatedAt, @download)
+        ON CONFLICT (name) DO NOTHING
         ''',
         substitutionValues: {
-          'pkgName': package.name,
-          'version': version.version,
-          'pubspec': jsonEncode(version.pubspec),
-          'yaml': version.pubspecYaml,
-          'uploader': version.uploader,
-          'readme': version.readme,
-          'changelog': version.changelog,
-          'createdAt': version.createdAt.toIso8601String(),
+          'name': package.name,
+          'private': package.private,
+          'createdAt': package.createdAt.toIso8601String(),
+          'updatedAt': package.updatedAt.toIso8601String(),
+          'download': package.download ?? 0,
         },
       );
-    }
 
-    // Insert downloads from stats
-    final stats = await mongoStats.findOne({'name': package.name});
-    if (stats != null) {
-      for (final entry in stats.entries) {
-        if (entry.key.startsWith('d')) {
-          final dateStr = entry.key.substring(1); // ex: "20240511"
-          final count = entry.value as int;
+      // Get package_id
+      final result = await postgresConnection.query(
+        'SELECT id FROM packages WHERE name = @name',
+        substitutionValues: {'name': package.name},
+      );
 
+      if (result.isEmpty) {
+        print('❌ Package ID not found for ${package.name}, skipping');
+        continue;
+      }
+
+      final packageId = result.first[0] as int;
+
+      // Insert uploaders (dans la table dédiée)
+      if (package.uploaders != null) {
+        for (final email in package.uploaders!) {
           await postgresConnection.query(
             '''
-            INSERT INTO downloads (package_id, date, count)
-            VALUES (@id, @date, @count)
-            ON CONFLICT (package_id, date) DO UPDATE SET count = EXCLUDED.count
+            INSERT INTO uploaders (package_id, email)
+            VALUES (@packageId, @email)
+            ON CONFLICT DO NOTHING
             ''',
             substitutionValues: {
-              'id': packageId,
-              'date': dateStr,
-              'count': count,
+              'packageId': packageId,
+              'email': email,
             },
           );
         }
       }
-    }
 
-    print('✅ Migrated package: ${package.name}');
+      // Insert versions (en reliant à package_id)
+      for (final version in package.versions) {
+        await postgresConnection.query(
+          '''
+          INSERT INTO versions (
+            package_id, version, pubspec, pubspec_yaml, uploader, readme, changelog, created_at
+          )
+          VALUES (
+            @packageId, @version, @pubspec, @yaml, @uploader, @readme, @changelog, @createdAt
+          )
+          ON CONFLICT (package_id, version) DO NOTHING
+          ''',
+          substitutionValues: {
+            'packageId': packageId,
+            'version': version.version,
+            'pubspec': jsonEncode(version.pubspec),
+            'yaml': version.pubspecYaml,
+            'uploader': version.uploader,
+            'readme': version.readme,
+            'changelog': version.changelog,
+            'createdAt': version.createdAt.toIso8601String(),
+          },
+        );
+      }
+
+      // Insert downloads from stats
+      final stats = await mongoStats.findOne({'name': package.name});
+      if (stats != null) {
+        for (final entry in stats.entries) {
+          if (entry.key.startsWith('d')) {
+            final dateStr = entry.key.substring(1); // ex: "20240511"
+            final count = entry.value as int;
+
+            await postgresConnection.query(
+              '''
+              INSERT INTO downloads (package_id, date, count)
+              VALUES (@id, @date, @count)
+              ON CONFLICT (package_id, date) DO UPDATE SET count = EXCLUDED.count
+              ''',
+              substitutionValues: {
+                'id': packageId,
+                'date': dateStr,
+                'count': count,
+              },
+            );
+          }
+        }
+      }
+
+      print('✅ Migrated package: ${package.name}');
+    }
+  } on Exception catch (e) {
+    print(e);
+  } on Error catch (e) {
+    print(e);
   }
 }
